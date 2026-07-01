@@ -92,10 +92,10 @@ class HMATensorDataset(Dataset):
         # ======================================================================
         if self.mode == "train":
             if data.ndim == 3:
-            c, h, w = data.shape
-        else:
-            h, w = data.shape
-            c = 1
+                c, h, w = data.shape
+            else:
+                h, w = data.shape
+                c = 1
             
             # Safely handle inputs smaller than train_crop to prevent ValueError
             pad_h = max(0, self.train_crop - h)
