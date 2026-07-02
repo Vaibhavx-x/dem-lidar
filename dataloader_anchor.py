@@ -205,7 +205,7 @@ def create_dataloaders(train_dirs, val_dirs, batch_size=4, num_workers=8, prefet
         prefetch_factor=train_prefetch,
         pin_memory=pin_memory, 
         drop_last=True,
-        persistent_workers=True
+        persistent_workers=(num_workers > 0)  # Must be False when num_workers=0
     )
     
     # VAL LOADER

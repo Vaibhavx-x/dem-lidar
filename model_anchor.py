@@ -133,24 +133,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DistanceGatedTopoLoss(nn.Module):
+    """
+    Rubber-sheet loss for DG-VDSR.
+
+    Key fix vs. previous version:
+    - base_loss is halo-masked: relaxed near photon pixels so the network
+      is free to deviate from the optical GT where LiDAR corrections land.
+    - slope_loss and curve_loss are split into two zones:
+        OUTSIDE buffer ring: supervised against optical gt_dem (correct terrain shape)
+        INSIDE buffer ring but off-photon: UNSUPERVISED smoothness on pred_dem itself
+      This prevents the network exploiting single-pixel spikes to simultaneously
+      satisfy pin_loss (few pixels) while leaving slope_loss unchanged (diluted mean).
+    - pin_loss is strictly at photon pixels only, normalized by photon count.
+    - buffer_size is in PIXELS; converted to metres internally (buffer_size * 10.0).
+    """
     def __init__(
         self,
         alpha=1.0,
-        beta=2.0,
-        gamma=5.0,
-        lambda_pin=4.0,
-        pin_beta=2.0,
-        decay_radius=20.0,
-        buffer_size=5,
+        beta=1.5,
+        gamma=0.5,
+        lambda_pin=1.0,       # Start low; ramped to 5.0 over first 15 epochs externally
+        pin_beta=1.0,         # SmoothL1 transition point in metres
+        decay_radius=15.0,    # Halo decay width in metres (~one ATL08 along-track spacing)
+        buffer_size=3,        # Buffer ring width in PIXELS (3px = 30m at 10m/px)
     ):
         super().__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.lambda_pin = lambda_pin
-        self.pin_beta = pin_beta
+        self.alpha        = alpha
+        self.beta         = beta
+        self.gamma        = gamma
+        self.lambda_pin   = lambda_pin
+        self.pin_beta     = pin_beta
         self.decay_radius = decay_radius
-        self.buffer_size = buffer_size
+        # Convert buffer from pixels to metres for comparison against dist_map (metres)
+        self.buffer_metres = buffer_size * 10.0
 
         sobel_x = torch.tensor(
             [[-1.,  0.,  1.],
@@ -173,83 +188,94 @@ class DistanceGatedTopoLoss(nn.Module):
             dtype=torch.float32
         ).view(1, 1, 3, 3)
 
-        self.register_buffer("sobel_x", sobel_x)
-        self.register_buffer("sobel_y", sobel_y)
+        self.register_buffer("sobel_x",   sobel_x)
+        self.register_buffer("sobel_y",   sobel_y)
         self.register_buffer("laplacian", laplacian)
 
     def _safe_conv(self, tensor, kernel):
         padded = F.pad(tensor, pad=(1, 1, 1, 1), mode="replicate")
         return F.conv2d(padded, kernel, padding=0)
 
-    def _make_buffered_mask(self, mask):
-        """
-        Expands photon supervision to a local neighborhood.
-        mask: [B, 1, H, W]
-        returns: float tensor [B, 1, H, W]
-        """
-        mask = mask.float()
-        pad = self.buffer_size // 2
-        buffered = F.max_pool2d(mask, kernel_size=self.buffer_size, stride=1, padding=pad)
-        return (buffered > 0).float()
-
     def forward(self, pred_dem, gt_dem, lidar_raw, mask, dist_map):
         """
-        pred_dem : [B, 1, H, W]
-        gt_dem   : [B, 1, H, W]
-        lidar_raw: [B, 1, H, W]
-        mask     : [B, 1, H, W]
-        dist_map : [B, 1, H, W]  (EDT distance in meters)
+        All inputs: [B, 1, H, W] float32
+          pred_dem : model output (zero-centred)
+          gt_dem   : HMA DTM ch3 (zero-centred by same patch_mean)
+          lidar_raw: raw ATL08 elevation ch1 (zero-centred by same patch_mean)
+          mask     : binary photon mask ch2
+          dist_map : EDT in metres (computed in _package_dg_vdsr; 500m for no-photon patches)
         """
-        mask = mask.float()
+        mask     = mask.float()
         dist_map = dist_map.float()
 
-        # Base elevation loss
-        base_loss = F.l1_loss(pred_dem, gt_dem)
+        # ── 1. Spatial Halo ──────────────────────────────────────────────────
+        # w_halo → 1.0 at photon (dist=0), → 0.0 far away
+        w_halo = torch.exp(-dist_map / self.decay_radius)
 
-        # Slope loss
+        # ── 2. Base Elevation Loss (optical, relaxed near photons) ───────────
+        base_pixel_loss = F.l1_loss(pred_dem, gt_dem, reduction="none")
+        base_loss = ((1.0 - w_halo) * base_pixel_loss).mean()
+
+        # ── 3. Zone Masks for Differential Losses ────────────────────────────
+        # inner_zone: all pixels within buffer_metres of any photon, INCLUDING
+        # the photon pixel itself (dist_map=0 at mask==1 by EDT construction,
+        # so the old '& (mask < 0.5)' exclusion was wrong — spikes at photon
+        # pixels still escaped the localized term via mean-dilution over 65k px).
+        # outside_buffer: normal optical-supervised zone.
+        inner_zone     = (dist_map <= self.buffer_metres).float()
+        outside_buffer = 1.0 - inner_zone
+
+        # ── 4. Differential Losses (Slope + Curvature) ───────────────────────
         pred_dx = self._safe_conv(pred_dem, self.sobel_x)
         pred_dy = self._safe_conv(pred_dem, self.sobel_y)
-        gt_dx   = self._safe_conv(gt_dem, self.sobel_x)
-        gt_dy   = self._safe_conv(gt_dem, self.sobel_y)
-        slope_loss = F.l1_loss(pred_dx, gt_dx) + F.l1_loss(pred_dy, gt_dy)
+        gt_dx   = self._safe_conv(gt_dem,   self.sobel_x)
+        gt_dy   = self._safe_conv(gt_dem,   self.sobel_y)
 
-        # Curvature loss
         pred_curve = self._safe_conv(pred_dem, self.laplacian)
-        gt_curve   = self._safe_conv(gt_dem, self.laplacian)
-        curve_loss = F.l1_loss(pred_curve, gt_curve)
+        gt_curve   = self._safe_conv(gt_dem,   self.laplacian)
 
-        # Buffered anchor region
-        buffered_mask = self._make_buffered_mask(mask)
+        # Outside inner zone: supervised against optical GT (correct terrain shape)
+        slope_sup = (outside_buffer * (
+            F.l1_loss(pred_dx, gt_dx, reduction="none") +
+            F.l1_loss(pred_dy, gt_dy, reduction="none")
+        )).mean()
+        curve_sup = (outside_buffer * F.l1_loss(pred_curve, gt_curve, reduction="none")).mean()
 
-        # Distance weight: strong near photons, weaker farther away
-        dist_weight = torch.exp(-dist_map / self.decay_radius)
+        # Inside inner zone (incl. photon pixels): UNSUPERVISED smoothness.
+        # Penalises pred_dem's own gradient/curvature magnitude — the rubber-sheet
+        # tension that prevents spikes. Normalised per inner-zone pixel so scale
+        # is invariant to photon density.
+        n_inner      = inner_zone.sum() + 1e-8
+        slope_smooth = (inner_zone * (pred_dx.abs() + pred_dy.abs())).sum() / n_inner
+        curve_smooth = (inner_zone * pred_curve.abs()).sum() / n_inner
 
-        # Combine the two
-        anchor_weight = buffered_mask * dist_weight
+        slope_loss = slope_sup + slope_smooth
+        curve_loss = curve_sup + curve_smooth
 
-        # SmoothL1 anchor loss, weighted spatially
+        # ── 5. Anchor / Pin Loss (strictly at photon pixels) ──────────────────
         pin_pixel_loss = F.smooth_l1_loss(
             pred_dem,
             lidar_raw,
             beta=self.pin_beta,
             reduction="none"
         )
+        num_photons = mask.sum() + 1e-8
+        pin_loss = (mask * pin_pixel_loss).sum() / num_photons
 
-        pin_loss = (anchor_weight * pin_pixel_loss).sum() / (anchor_weight.sum() + 1e-8)
-
+        # ── 6. Total ──────────────────────────────────────────────────────────
         total_loss = (
-            self.alpha * base_loss
-            + self.beta * slope_loss
-            + self.gamma * curve_loss
-            + self.lambda_pin * pin_loss
+            self.alpha      * base_loss  +
+            self.beta       * slope_loss +
+            self.gamma      * curve_loss +
+            self.lambda_pin * pin_loss
         )
 
         return {
             "total": total_loss,
-            "base": base_loss,
+            "base":  base_loss,
             "slope": slope_loss,
             "curve": curve_loss,
-            "pin": pin_loss,
+            "pin":   pin_loss,
         }
 # ==============================================================================
 # SANITY CHECK: Execute this script to test your GPU/CPU tensor flow
