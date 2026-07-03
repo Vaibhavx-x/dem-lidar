@@ -190,7 +190,7 @@ class HMATensorDataset(Dataset):
                 "gt_canvas_full": torch.from_numpy(data[3].copy())
             }
 
-
+# UPDATE THIS LINE to include num_workers, prefetch_factor, and pin_memory
 def create_dataloaders(train_dirs, val_dirs, batch_size=4, num_workers=8, prefetch_factor=4, pin_memory=True):
     train_dataset = HMATensorDataset(train_dirs, mode="train", train_crop=128)
     val_dataset   = HMATensorDataset(val_dirs,   mode="val",   val_crop=256, val_overlap=192)
@@ -201,7 +201,8 @@ def create_dataloaders(train_dirs, val_dirs, batch_size=4, num_workers=8, prefet
         train_dataset, 
         batch_size=batch_size, 
         shuffle=True, 
-        num_workers=num_workers, 
+        num_workers=num_workers,
+    
         prefetch_factor=train_prefetch,
         pin_memory=pin_memory, 
         drop_last=True,
