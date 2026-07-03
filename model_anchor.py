@@ -5,36 +5,38 @@ import torch.nn.functional as F
 # ==============================================================================
 # 1. STREAM A: THE GEOMORPHOLOGY BACKBONE (Standard VDSR)
 # ==============================================================================
-class ConvPReLU(nn.Module):
-    """Standard VDSR building block: 3x3 Conv -> PReLU"""
-    def __init__(self, channels):
+class ConvGNPReLU(nn.Module):
+    """Residual block: Conv -> GroupNorm -> PReLU, with a skip connection."""
+    def __init__(self, channels, num_groups=8):
         super().__init__()
-        self.conv = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.conv  = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.norm  = nn.GroupNorm(num_groups=num_groups, num_channels=channels)
         self.prelu = nn.PReLU(channels)
 
     def forward(self, x):
-        return self.prelu(self.conv(x))
+        out = self.conv(x)
+        out = self.norm(out)
+        out = self.prelu(out)
+        return x + out   # per-block residual — direct gradient path through depth
+
 
 class TopoStream(nn.Module):
-    def __init__(self, num_layers=18, features=64):
+    def __init__(self, num_layers=18, features=64, num_groups=8):
         super().__init__()
-        # Input Layer (1 channel -> 64)
         self.entry = nn.Sequential(
             nn.Conv2d(1, features, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=num_groups, num_channels=features),
             nn.PReLU(features)
         )
-        
-        # Body (16 intermediate layers)
-        layers = [ConvPReLU(features) for _ in range(num_layers - 2)]
+        layers = [ConvGNPReLU(features, num_groups=num_groups) for _ in range(num_layers - 2)]
         self.body = nn.Sequential(*layers)
-        
-        # Output Layer (64 -> 1 channel residual)
+        # Exit stays raw (no norm/activation) — needs unrestricted output range for r_topo
         self.exit = nn.Conv2d(features, 1, kernel_size=3, padding=1, bias=False)
 
     def forward(self, x):
         x = self.entry(x)
         x = self.body(x)
-        return self.exit(x) # Outputs R_topo
+        return self.exit(x)
 
 
 # ==============================================================================
