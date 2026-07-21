@@ -1,77 +1,38 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.pycover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# VS Code
-.vscode/
-
-# Project Specific
-Dataset/
-checkpoints_dg_vdsr/
+# Checkpoints
 *.pt
 *.pth
-*.ckpt
-*.json
+checkpoints*/
+fine_symgate/
+vdsr_checkpoints/
+
+# Data and Outputs
+*.npz
+*.npy
+*.tif
+*.tiff
+*.zip
+tensors_256/
+dataset_12m/
+Dataset/
+inference/
+data/tensors/
+data/inference_output/
+
+# Quarantine folder
+_to_delete/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+
+# Anaconda / Jupyter
+anaconda_projects/
+.jupyter/

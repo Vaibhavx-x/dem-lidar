@@ -104,7 +104,7 @@ def create_dataloaders(train_dirs, val_dirs):
 
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=4, 
+        batch_size=32, 
         shuffle=True, 
         num_workers=0,   # 0 prevents Jupyter Windows crashes
         pin_memory=True,

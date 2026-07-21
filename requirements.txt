@@ -1,4 +1,11 @@
-torch
+torch>=2.0
+torchvision
 numpy
 scipy
+rasterio
+fiona
+shapely
 tqdm
+matplotlib
+jupyter
+ipykernel
